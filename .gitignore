@@ -1,0 +1,9 @@
+# Ignore everything by default
+*
+
+# Allow python and text source files
+!*.py
+!*.txt
+
+# Always keep gitignore tracked
+!.gitignore
