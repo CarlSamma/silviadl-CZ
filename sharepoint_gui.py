@@ -25,6 +25,8 @@ class SharePointDownloaderGUI:
         self.formats = []
         self.download_thread = None
         self.downloadable_only = False
+        self.download_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "download")
+        os.makedirs(self.download_dir, exist_ok=True)
 
         self.build_ui()
 
@@ -91,8 +93,17 @@ class SharePointDownloaderGUI:
         self.filter_btn = ttk.Button(sel_frame, text="Filter Downloadable", command=self.toggle_downloadable_filter)
         self.filter_btn.grid(row=0, column=4, padx=5)
 
+        self.sort_smallest_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(sel_frame, text="Sort by smallest", variable=self.sort_smallest_var,
+                        command=self.on_sort_toggle).grid(row=0, column=5, padx=5)
+
+        style = ttk.Style()
+        style.configure("Fastest.TButton", font=("Segoe UI", 10, "bold"), background="#00AA00")
+        ttk.Button(sel_frame, text="⚡⚡⚡ FASTEST AUDIO ⚡⚡⚡", command=self.fastest_audio_only,
+                   style="Fastest.TButton").grid(row=0, column=6, padx=5, ipady=3)
+
         self.lbl_sel = ttk.Label(sel_frame, text="Video: [auto] | Audio: [auto]", font=("Segoe UI", 9, "bold"))
-        self.lbl_sel.grid(row=0, column=5, padx=20)
+        self.lbl_sel.grid(row=0, column=7, padx=20)
 
         # --- Action & Progress ---
         act_frame = ttk.Frame(self.root)
@@ -134,6 +145,9 @@ class SharePointDownloaderGUI:
     def on_audio_only_toggle(self):
         if self.audio_only_var.get():
             self.lbl_sel.config(text="MODE: Audio only")
+
+    def on_sort_toggle(self):
+        self.populate_formats()
 
     def get_base_cmd(self):
         url = self.url_var.get().strip()
@@ -197,6 +211,25 @@ class SharePointDownloaderGUI:
     # ------------------------------------------------------------------
     def populate_formats(self):
         self.root.after(0, lambda: self.tree.delete(*self.tree.get_children()))
+        
+        # Collect audio formats for finding smallest
+        audio_formats = []
+        for f in self.formats:
+            if self.downloadable_only and not self.is_downloadable_format(f):
+                continue
+            acodec = f.get("acodec", "none")
+            if acodec not in (None, "none") and f.get("ext") in ("m4a", "mp3", "webm", "ogg"):
+                size = f.get("filesize") or f.get("filesize_approx") or float('inf')
+                audio_formats.append((size, f.get("format_id")))
+        
+        # Sort audio by size if enabled
+        if self.sort_smallest_var.get() and audio_formats:
+            audio_formats.sort(key=lambda x: x[0])
+            smallest_id = audio_formats[0][1]
+        else:
+            smallest_id = None
+        
+        # Populate tree
         for f in self.formats:
             if self.downloadable_only and not self.is_downloadable_format(f):
                 continue
@@ -219,10 +252,13 @@ class SharePointDownloaderGUI:
             else:
                 typ = "unknown"
 
-            self.root.after(0, lambda _fid=fid, _ext=ext, _typ=typ, _res=resol,
-                                    _fps=fps, _sz=size, _pr=proto, _vc=vcodec, _ac=acodec:
-                self.tree.insert("", tk.END, values=(_fid, _typ, _ext, _res, _fps, _sz, _pr, _vc, _ac))
-            )
+            def insert_row(_fid=fid, _ext=ext, _typ=typ, _res=resol, _fps=fps, _sz=size, _pr=proto, _vc=vcodec, _ac=acodec):
+                item = self.tree.insert("", tk.END, values=(_fid, _typ, _ext, _res, _fps, _sz, _pr, _vc, _ac))
+                # Highlight smallest audio in green
+                if smallest_id and _fid == smallest_id and _typ == "audio":
+                    self.tree.item(item, tags=("fastest",))
+                    self.tree.tag_configure("fastest", background="#90EE90")
+            self.root.after(0, insert_row)
 
     def toggle_downloadable_filter(self):
         self.downloadable_only = not self.downloadable_only
@@ -298,7 +334,7 @@ class SharePointDownloaderGUI:
                 "-x",
                 "--audio-format", "mp3",
                 "--audio-quality", "0",
-                "-o", f"{out_name}.%(ext)s",
+                "-o", os.path.join(self.download_dir, f"{out_name}.%(ext)s"),
                 url
             ])
             self.run_ytdlp(cmd, "Downloading audio only...")
@@ -309,7 +345,7 @@ class SharePointDownloaderGUI:
             aid = self.audio_id_var.get() or "bestaudio"
 
             v_cmd = cmd.copy()
-            v_cmd.extend(["-f", vid, "-o", f"{out_name}_video.%(ext)s", url])
+            v_cmd.extend(["-f", vid, "-o", os.path.join(self.download_dir, f"{out_name}_video.%(ext)s"), url])
             self.log("=" * 50)
             self.log("STEP 1/3: Downloading VIDEO stream")
             rc = self.run_ytdlp(v_cmd, "Video stream download...")
@@ -318,7 +354,7 @@ class SharePointDownloaderGUI:
                 return
 
             a_cmd = cmd.copy()
-            a_cmd.extend(["-f", aid, "-o", f"{out_name}_audio.%(ext)s", url])
+            a_cmd.extend(["-f", aid, "-o", os.path.join(self.download_dir, f"{out_name}_audio.%(ext)s"), url])
             self.log("=" * 50)
             self.log("STEP 2/3: Downloading AUDIO stream")
             rc = self.run_ytdlp(a_cmd, "Audio stream download...")
@@ -330,17 +366,17 @@ class SharePointDownloaderGUI:
             self.log("STEP 3/3: Merging with FFmpeg")
             v_file = None
             a_file = None
-            for f in os.listdir("."):
+            for f in os.listdir(self.download_dir):
                 if f.startswith(f"{out_name}_video") and not f.endswith(".part"):
-                    v_file = f
+                    v_file = os.path.join(self.download_dir, f)
                 if f.startswith(f"{out_name}_audio") and not f.endswith(".part"):
-                    a_file = f
+                    a_file = os.path.join(self.download_dir, f)
 
             if not v_file or not a_file:
                 self.log("ERROR: cannot locate downloaded streams.")
                 return
 
-            out_mp4 = f"{out_name}.mp4"
+            out_mp4 = os.path.join(self.download_dir, f"{out_name}.mp4")
             ffm_cmd = [
                 "ffmpeg", "-y",
                 "-i", v_file,
@@ -374,7 +410,7 @@ class SharePointDownloaderGUI:
         cmd.extend([
             "-f", fmt_spec,
             "--merge-output-format", "mp4",
-            "-o", f"{out_name}.%(ext)s",
+            "-o", os.path.join(self.download_dir, f"{out_name}.%(ext)s"),
             url
         ])
         self.run_ytdlp(cmd, "Downloading & merging with yt-dlp...")
@@ -412,8 +448,41 @@ class SharePointDownloaderGUI:
             self.log(f"Process error: {e}")
             return -1
 
+    def fastest_audio_only(self):
+        """Find smallest audio format and download it directly as MP3."""
+        audio_formats = []
+        for f in self.formats:
+            acodec = f.get("acodec", "none")
+            if acodec not in (None, "none") and f.get("ext") in ("m4a", "mp3", "webm", "ogg"):
+                size = f.get("filesize") or f.get("filesize_approx") or float('inf')
+                audio_formats.append((size, f.get("format_id"), f.get("ext")))
+
+        if not audio_formats:
+            self.log("No audio formats found!")
+            return
+
+        audio_formats.sort(key=lambda x: x[0])
+        best_size, best_id, best_ext = audio_formats[0]
+        self.log(f"⚡ FASTEST: {best_id} ({best_ext}) - {best_size/1024/1024:.1f}MB")
+
+        res = self.get_base_cmd()
+        if not res:
+            return
+        cmd, url = res
+        out_name = self.output_name_var.get().strip() or "fastest_audio"
+
+        cmd.extend([
+            "-f", best_id,
+            "-x",
+            "--audio-format", "mp3",
+            "--audio-quality", "0",
+            "-o", os.path.join(self.download_dir, f"{out_name}.%(ext)s"),
+            url
+        ])
+        self.run_ytdlp(cmd, f"⚡ Downloading fastest audio: {best_id}")
+
     def open_folder(self):
-        os.startfile(os.path.abspath("."))
+        os.startfile(self.download_dir)
 
 
 if __name__ == "__main__":

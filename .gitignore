@@ -7,3 +7,7 @@
 
 # Always keep gitignore tracked
 !.gitignore
+
+# Ignore local download output
+download/
+download/**
